@@ -1,0 +1,621 @@
+---
+title: "Flow Reporting"
+author: "Nicola Topham"
+output: officedown::rdocx_document
+params:
+  current_month: 2024-06-01
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Load Libraries
+# ══════════════
+library(tidyverse)
+library(readxl)
+library(ini)
+library(flextable)
+library(officer)
+library(officedown)
+
+# Load Functions and Globals
+# ══════════════════════════
+
+# Flextable borders
+std_border <- fp_border(color = "gray")
+
+
+# Glenday Palette
+palGlenday <- scales::col_factor(
+    palette = c('Green' = 'darkgreen', 'Yellow' = 'gold', 'Blue' = 'royalblue', 'Red' = 'red3'),
+    levels = c('Green', 'Yellow', 'Blue', 'Red'))
+
+# Glenday Sieve
+fnGlenday <- function(df, var.x, var.y){
+  df <- df %>%
+    filter(get(var.y) > 0) %>%
+    arrange(desc(get(var.y)), get(var.x)) %>%
+    mutate(pct = get(var.y)/ sum(get(var.y)),
+           cumpct = cumsum(pct),
+           lag_cumpct = lag(cumpct),
+           glenday = if_else(cumpct <= 0.5 | (lag_cumpct < 0.5 & cumpct > 0.5),
+                             'Green',
+                             if_else(cumpct <= 0.95 | (lag_cumpct < 0.95 & cumpct > 0.95),
+                                     'Yellow',
+                                     if_else(cumpct <= 0.99 | (lag_cumpct < 0.99 & cumpct > 0.99),
+                                             'Blue','Red')))) %>%
+    select(-lag_cumpct)
+  return(df)
+}
+
+# Read in the initialisation file settings
+ini_file_settings <- read.ini('flow_reporting.ini')
+
+# Set the date variables
+
+# Month
+month_start <- as.Date(params$current_month)
+month_end <- month_start + months(1)
+
+quarter <- quarter(month_start)
+year <- year(month_start)
+
+year_list <- c(rep(year, 4), year+1) 
+quarter_list <- c('-01-01', '-04-01', '-07-01', '-10-01', '-01-01')
+quarter_list <- as.Date(paste0(year_list, quarter_list))
+
+# Financial Quarter
+quarter_start <- as.Date(quarter_list[quarter])
+quarter_end <- as.Date(quarter_list[quarter+1])
+
+# Financial Year
+year_start <- as.Date(quarter_list[1])
+year_end <- as.Date(quarter_list[5])
+```
+
+```{r import_workbooks, include=FALSE}
+df_data_points <- data.frame()
+df_support_and_referrals <- data.frame()
+df_outputs <- data.frame()
+df_outcomes <- data.frame()
+
+# Loop through each of the reporting workbooks
+for(f in ini_file_settings$reporting_workbooks){
+  # Import the data points worksheet
+  # ────────────────────────────────
+  # Only import the first 3 columns of the sheet and set the variable type
+  df_tmp <- read_excel(path = f, sheet = 'Data Points', range = cell_cols('A:C'), col_types = c('date','text','numeric')) %>%
+    # Rename the column names as previously these have overwritten by caseworkers
+    rename_with(.fn = ~c('month', 'metric', 'value')) %>% 
+    # Remove any rows that have no month or no value
+    filter(!is.na(month) & !is.na(value)) %>%
+    # Add the source filename to the data
+    mutate(source = basename(file.path(f)))
+  
+  # Bind to the combined data frame
+  df_data_points <- df_data_points %>% bind_rows(df_tmp)
+  
+  # Import the support and referrals worksheet
+  # ──────────────────────────────────────────
+
+  # Only import the first 4 columns of the sheet and set the variable type
+  df_tmp <- read_excel(path = f, sheet = 'Support and Referrals', range = cell_cols('A:D'), col_types = c('text','date','text','text')) %>%
+    # Rename the column names as previously these have overwritten by caseworkers
+    rename_with(.fn = ~c('client_id', 'month', 'section', 'support')) %>% 
+    # Remove any rows that have an NA in column
+    filter( !(is.na(client_id) | is.na(month) | is.na(section) | is.na(support))) %>%
+    # Add the source filename to the data
+    mutate(source = basename(file.path(f)))
+  
+  # Bind to the combined data frame
+  df_support_and_referrals <- df_support_and_referrals %>% bind_rows(df_tmp)
+
+  # Import the outputs worksheet
+  # ────────────────────────────
+  
+  # Only import the first 4 columns of the sheet and set the variable type
+  df_tmp <- read_excel(path = f, sheet = 'Outputs', range = cell_cols('A:D'), col_types = c('text','date','text','text')) %>%
+    # Rename the column names as previously these have overwritten by caseworkers
+    rename_with(.fn = ~c('client_id', 'month', 'section', 'output')) %>% 
+    # Remove any rows that have an NA in column
+    filter( !(is.na(client_id) | is.na(month) | is.na(section) | is.na(output))) %>%
+    # Add the source filename to the data
+    mutate(source = basename(file.path(f)))
+  
+  # Bind to the combined data frame
+  df_outputs <- df_outputs %>% bind_rows(df_tmp)
+
+  # Import the outcomes worksheet
+  # ─────────────────────────────
+  
+  # Only import the first 4 columns of the sheet and set the variable type
+  df_tmp <- read_excel(path = f, sheet = 'Outcomes', range = cell_cols('A:D'), col_types = c('text','date','text','text')) %>%
+    # Rename the column names as previously these have overwritten by caseworkers
+    rename_with(.fn = ~c('client_id', 'month', 'section', 'outcome')) %>% 
+    # Remove any rows that have an NA in column
+    filter( !(is.na(client_id) | is.na(month) | is.na(section) | is.na(outcome))) %>%
+    # Add the source filename to the data
+    mutate(source = basename(file.path(f)))
+  
+  # Bind to the combined data frame
+  df_outcomes <- df_outcomes %>% bind_rows(df_tmp)
+}
+
+# Read each of the worker's sheets in the caseload tracker
+tracker_sheets <- unlist(unname(
+  ini_file_settings$caseload_tracker[grepl('^sheet_', names(ini_file_settings$caseload_tracker))]
+  ))
+
+tracker_col_names <- unlist(unname(ini_file_settings$caseload_tracker)[grepl('^col_name_', names(ini_file_settings$caseload_tracker))])
+
+df_caseload_tracker <- data.frame()
+for(s in tracker_sheets){
+  df_tmp <- read_excel(path = ini_file_settings$caseload_tracker$caseload_tracker,
+                       sheet = s,
+                       skip = 1,
+                       col_type = 'text') %>%
+    rename_with(.fn = ~tracker_col_names) %>%
+    dplyr::filter(!is.na(name)) %>%
+    mutate(support_start = as.Date(support_start, format = '%d/%m/%Y'),
+           support_end = as.Date(support_end, format = '%d/%m/%Y'))
+  df_caseload_tracker <- df_caseload_tracker %>% bind_rows(df_tmp)
+}
+
+# Simplify the data frame
+df_caseload_tracker <- df_caseload_tracker %>% 
+  select(gender, age, postcode, 
+         status, closure_reason, support_start, support_end, 
+         ed_3m, em_3m, amb_3m,
+         ed_12m, em_12m, amb_12m,
+         wemwbs_entry, wemwbs_exit,
+         mental_health_entry, mental_health_exit,
+         physical_health_entry, physical_health_exit,
+         housing_entry, housing_exit,
+         diet_entry, diet_exit,
+         relationships_entry, relationships_exit,
+         finance_entry, finance_exit,
+         personal_growth_entry, personal_growth_exit,
+         community_entry, community_exit,
+         abuse_neglect_entry, abuse_neglect_exit,
+         child_support_entry, child_support_exit)
+
+ed_col_names <- unlist(unname(ini_file_settings$ed_activity)[grepl('^col_name_', names(ini_file_settings$ed_activity))])
+
+# Read the ED activity workbook
+df_ed_activity <- read_excel(path = ini_file_settings$ed_activity$path,
+                             sheet = ini_file_settings$ed_activity$sheet) %>%
+  rename_with(.fn = ~ed_col_names) %>%
+  select(patient_id, nhs_number, hospital_number,
+         ed_curr_12m, em_curr_12m, amb_curr_12m)
+
+dir.create('./output')
+save(file = './output/reporting_workbooks_data.RObj', list = c('df_data_points', 'df_support_and_referrals', 'df_outputs', 'df_outcomes', 'df_caseload_tracker', 'df_ed_activity'))
+```
+
+## NHS England Key Performance Indicators 
+```{r nhs_kpis, echo = FALSE}
+# New clients per quarter - this will be new clients who have started support during the reporting month
+# and have a closure reason of NA, Closed successfully or disengaged
+valid_closure_reasons <- c('Closed successfully', 'Disengaged')
+
+df_caseload_tracker %>% 
+  filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
+           as.Date(support_start) < month_end & 
+           as.Date(support_start) >= as.Date(quarter_list[1]) &  
+           as.Date(support_start) < as.Date(quarter_list[2])) %>%
+  summarise(Q1 = n()) %>%
+  ungroup() %>%
+  bind_cols(
+    df_caseload_tracker %>% 
+      filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
+               as.Date(support_start) < month_end & 
+               as.Date(support_start) >= as.Date(quarter_list[2]) &  
+               as.Date(support_start) < as.Date(quarter_list[3])) %>%
+      summarise(Q2 = n()) %>%
+      ungroup()
+  ) %>%
+  bind_cols(
+    df_caseload_tracker %>% 
+      filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
+               as.Date(support_start) < month_end & 
+               as.Date(support_start) >= as.Date(quarter_list[3]) &  
+               as.Date(support_start) < as.Date(quarter_list[4])) %>%
+      summarise(Q3 = n()) %>%
+      ungroup()
+  ) %>%
+  bind_cols(
+    df_caseload_tracker %>% 
+      filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
+               as.Date(support_start) < month_end & 
+               as.Date(support_start) >= as.Date(quarter_list[4]) &  
+               as.Date(support_start) < as.Date(quarter_list[5])) %>%
+      summarise(Q4 = n()) %>%
+      ungroup()
+  )
+  
+  
+
+
+
+```
+
+## Data Points
+
+```{r data_points, echo = FALSE}
+# Create the category list 
+categories <- c('Number of new clients referred', 'Number of wider beneficiaries',
+                'Total number of people supported for month', 'Clients who declined',
+                'Total current open cases', 'Case concluded successfully',
+                'Closed cases due to disengagement', 'Closed cases due to death',
+                'Closed cases (other reasons, ie moving out of area)', 'Client feedback with OND completed',
+                'Referrer satisfaction forms received', 'Number of contacts/interventions with clients')
+
+df_categories <- data.frame(category = factor(categories, levels = categories))
+
+# Current Month
+df_data <- df_categories %>% 
+  left_join(
+    df_data_points %>%
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= month_start &  as.Date(month) < month_end) %>%
+      group_by(metric) %>%
+      summarise(Month = sum(value, na.rm = TRUE)) %>%
+      ungroup(),
+    by = c('category' = 'metric')) %>%
+  replace_na(replace = list('Month' = 0)) %>%
+  left_join(
+    # Quarter 1
+    df_data_points %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[1]) &  as.Date(month) < as.Date(quarter_list[2])) %>%
+      group_by(metric) %>%
+      summarise(Q1 = sum(value, na.rm = TRUE)) %>%
+      ungroup(),
+    by = c('category' = 'metric')) %>%
+  replace_na(replace = list('Q1' = 0)) %>%
+  left_join(
+    # Quarter 2
+    df_data_points %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[2]) &  as.Date(month) < as.Date(quarter_list[3])) %>%
+      group_by(metric) %>%
+      summarise(Q2 = sum(value, na.rm = TRUE)) %>%
+      ungroup(),
+    by = c('category' = 'metric')) %>%
+  replace_na(replace = list('Q2' = 0)) %>%
+  left_join(
+    # Quarter 3
+    df_data_points %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[3]) &  as.Date(month) < as.Date(quarter_list[4])) %>%
+      group_by(metric) %>%
+      summarise(Q3 = sum(value, na.rm = TRUE)) %>%
+      ungroup(),
+    by = c('category' = 'metric')) %>%
+  replace_na(replace = list('Q3' = 0)) %>%
+  left_join(
+    # Quarter 4
+    df_data_points %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[4]) &  as.Date(month) < as.Date(quarter_list[5])) %>%
+      group_by(metric) %>%
+      summarise(Q4 = sum(value, na.rm = TRUE)) %>%
+      ungroup(),
+    by = c('category' = 'metric')) %>%
+  replace_na(replace = list('Q4' = 0)) %>%
+  left_join(
+    # YTD
+    df_data_points %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[1]) &  as.Date(month) < as.Date(quarter_list[5])) %>%
+      group_by(metric) %>%
+      summarise(YTD = sum(value, na.rm = TRUE)) %>%
+      ungroup(),
+    by = c('category' = 'metric')) %>%
+  replace_na(replace = list('YTD' = 0))
+
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    category = 'Monthly Data Points',
+    Month = 'Month',
+    Q1 = 'Q1',
+    Q2 = 'Q2',
+    Q3 = 'Q3',
+    Q4 = 'Q4',
+    YTD = 'YTD') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  vline(j = c(1:2, 6:7), part = "all", border = fp_border()) %>%
+  bold(bold = TRUE, part = "header")
+tbl
+```
+
+## Support Provided
+
+```{r support_provided, echo = FALSE}
+# Create the category list 
+categories <- c('Team Around the Person meeting conducted',
+                'Flow meeting with FC & Lead Professional',
+                'One-to-one work with clients (per client) number of individual one to one interactions with client',
+                'Continued ongoing contacts with professionals (total number of seperate contacts)',
+                'Caseworker research undertaken to find solutions for clients',
+                'Caseworker support to access Personal Health Budget',
+                'Caseworker support with Form filling',
+                'Caseworker support with IT incl. virtual meetings, emails etc',
+                'Caseworker support to meet aspirations',
+                'Client involved in coproduction work (total number of seperate contacts)',
+                'Successful court action',
+                'Client represented in court')
+
+df_categories <- data.frame(category = factor(categories, levels = categories))
+
+# Current Month
+df_data <- df_categories %>% 
+  left_join(
+    df_support_and_referrals %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= month_start &  as.Date(month) < month_end) %>%
+      group_by(support) %>%
+      summarise(Month = n()) %>%
+      ungroup(),
+    by = c('category' = 'support')) %>%
+  replace_na(replace = list('Month' = 0)) %>%
+  left_join(
+    # Quarter 1
+    df_support_and_referrals %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[1]) &  as.Date(month) < as.Date(quarter_list[2])) %>%
+      group_by(support) %>%
+      summarise(Q1 = n()) %>%
+      ungroup(),
+    by = c('category' = 'support')) %>%
+  replace_na(replace = list('Q1' = 0)) %>%
+  left_join(
+    # Quarter 2
+    df_support_and_referrals %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[2]) &  as.Date(month) < as.Date(quarter_list[3])) %>%
+      group_by(support) %>%
+      summarise(Q2 = n()) %>%
+      ungroup(),
+    by = c('category' = 'support')) %>%
+  replace_na(replace = list('Q2' = 0)) %>%
+  left_join(
+    # Quarter 3
+    df_support_and_referrals %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[3]) &  as.Date(month) < as.Date(quarter_list[4])) %>%
+      group_by(support) %>%
+      summarise(Q3 = n()) %>%
+      ungroup(),
+    by = c('category' = 'support')) %>%
+  replace_na(replace = list('Q3' = 0)) %>%
+  left_join(
+    # Quarter 4
+    df_support_and_referrals %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[4]) &  as.Date(month) < as.Date(quarter_list[5])) %>%
+      group_by(support) %>%
+      summarise(Q4 = n()) %>%
+      ungroup(),
+    by = c('category' = 'support')) %>%
+  replace_na(replace = list('Q4' = 0)) %>%
+  left_join(
+    # YTD
+    df_support_and_referrals %>% 
+      filter(as.Date(month) < month_end & 
+               as.Date(month) >= as.Date(quarter_list[1]) &  as.Date(month) < as.Date(quarter_list[5])) %>%
+      group_by(support) %>%
+      summarise(YTD = n()) %>%
+      ungroup(),
+    by = c('category' = 'support')) %>%
+  replace_na(replace = list('YTD' = 0))
+
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    category = 'Monthly Data Points',
+    Month = 'Month',
+    Q1 = 'Q1',
+    Q2 = 'Q2',
+    Q3 = 'Q3',
+    Q4 = 'Q4',
+    YTD = 'YTD') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  vline(j = c(1:2, 6:7), part = "all", border = fp_border()) %>%
+  bold(bold = TRUE, part = "header")
+tbl
+```
+
+## Outputs
+
+```{r outputs_sections, echo = FALSE}
+# For the visuals we will use the data from the current financial quarter
+df_data <- df_outputs %>% 
+  filter(as.Date(month) < month_end & 
+           as.Date(month) >= quarter_start & as.Date(month) < quarter_end) %>%
+  group_by(section) %>%
+  summarise(volume = n()) %>%
+  ungroup()
+
+df_data <- fnGlenday(df_data, var.x = 'section', var.y = 'volume')
+
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    section = 'Section',
+    volume = 'Volume',
+    pct = '% of Outputs',
+    cumpct = 'Cumulative % of Outputs',
+    glenday = 'Glenday Sieve') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  mk_par(j = 'pct', value = as_paragraph(as_chunk(pct, formatter = fmt_pct))) %>%
+  mk_par(j = 'cumpct', value = as_paragraph(as_chunk(cumpct, formatter = fmt_pct))) %>%
+  bg(j = 'glenday', bg = palGlenday) %>%
+  color(j = 'glenday', color = function(x){ifelse(x=='Yellow', 'black', 'white')}) %>%
+  align(j = 'glenday', align = 'center') %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  bold(bold = TRUE, part = "header")
+
+plt <- ggplot(data = df_data) %+%
+  theme_bw(base_size = 10) %+%
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) %+%
+  labs(title = paste0('Glenday Sieve Plot for Outputs for the Period\n', 
+                      format(quarter_start, '%Y-%m-%d'), ' to ',
+                      format(quarter_end, '%Y-%m-%d')),
+       x = 'Output Section', y = 'Number of Outputs') %+%
+  guides(fill = guide_legend(title = 'Glenday Sieve')) %+%
+  geom_bar(aes(x = forcats::fct_reorder(str_wrap(section, 20), -volume), y = volume, fill = glenday), stat = 'identity') %+%
+  scale_fill_manual(values = c('Green' = 'darkgreen', 
+                               'Yellow' = 'gold', 
+                               'Blue' = 'royalblue', 
+                               'Red' = 'red3'),
+                    breaks = c('Green','Yellow','Blue','Red'))
+```
+
+### Sections - Table
+
+```{r outputs_sections_table, echo = FALSE}
+tbl
+block_section(prop_section(type = 'continuous'))
+```
+
+
+### Sections - Plot
+
+```{r outputs_sections_plot, echo = FALSE, fig.asp = 0.8, fig.width = 7, out.width = "100%"}
+plt
+block_section(prop_section(page_size = page_size(orient = 'landscape')))
+```
+
+
+### Section and Output
+
+```{r outputs_sections_and_outputs, echo = FALSE}
+df_data <- df_outputs %>% 
+  filter(as.Date(month) < month_end & 
+           as.Date(month) >= quarter_start & as.Date(month) < quarter_end) %>%
+  group_by(section, output) %>%
+  summarise(volume = n(), .groups = 'keep') %>%
+  ungroup()
+
+df_data <- fnGlenday(df_data, var.x = 'output', var.y = 'volume')
+
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    section = 'Section',
+    output = 'Output',
+    volume = 'Volume',
+    pct = '% of Outputs',
+    cumpct = 'Cumulative % of Outputs',
+    glenday = 'Glenday Sieve') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  mk_par(j = 'pct', value = as_paragraph(as_chunk(pct, formatter = fmt_pct))) %>%
+  mk_par(j = 'cumpct', value = as_paragraph(as_chunk(cumpct, formatter = fmt_pct))) %>%
+  bg(j = 'glenday', bg = palGlenday) %>%
+  color(j = 'glenday', color = function(x){ifelse(x=='Yellow', 'black', 'white')}) %>%
+  align(j = 'glenday', align = 'center') %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  bold(bold = TRUE, part = "header")
+tbl
+```
+
+## Outcomes
+
+```{r outcomes_sections, echo = FALSE}
+# For the visuals we will use the data from the current financial quarter
+df_data <- df_outcomes %>% 
+  filter(as.Date(month) < month_end & 
+           as.Date(month) >= quarter_start & as.Date(month) < quarter_end) %>%
+  group_by(section) %>%
+  summarise(volume = n()) %>%
+  ungroup()
+
+df_data <- fnGlenday(df_data, var.x = 'section', var.y = 'volume')
+
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    section = 'Section',
+    volume = 'Volume',
+    pct = '% of Outcomes',
+    cumpct = 'Cumulative % of Outcomes',
+    glenday = 'Glenday Sieve') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  mk_par(j = 'pct', value = as_paragraph(as_chunk(pct, formatter = fmt_pct))) %>%
+  mk_par(j = 'cumpct', value = as_paragraph(as_chunk(cumpct, formatter = fmt_pct))) %>%
+  bg(j = 'glenday', bg = palGlenday) %>%
+  color(j = 'glenday', color = function(x){ifelse(x=='Yellow', 'black', 'white')}) %>%
+  align(j = 'glenday', align = 'center') %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  bold(bold = TRUE, part = "header")
+
+plt <- ggplot(data = df_data) %+%
+  theme_bw(base_size = 10) %+%
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) %+%
+  labs(title = paste0('Glenday Sieve Plot for Outcomes for the Period\n', 
+                      format(quarter_start, '%Y-%m-%d'), ' to ',
+                      format(quarter_end, '%Y-%m-%d')),
+       x = 'Outcome Section', y = 'Number of Outcomes') %+%
+  guides(fill = guide_legend(title = 'Glenday Sieve')) %+%
+  geom_bar(aes(x = forcats::fct_reorder(str_wrap(section, 20), -volume), y = volume, fill = glenday), stat = 'identity') %+%
+  scale_fill_manual(values = c('Green' = 'darkgreen', 
+                               'Yellow' = 'gold', 
+                               'Blue' = 'royalblue', 
+                               'Red' = 'red3'),
+                    breaks = c('Green','Yellow','Blue','Red'))
+```
+
+### Sections - Table
+
+```{r outcomes_sections_table, echo = FALSE}
+tbl
+block_section(prop_section(type = 'continuous'))
+```
+
+### Sections - Plot
+
+```{r outcomes_sections_plot, echo = FALSE, fig.asp = 0.8, fig.width = 7, out.width = "100%"}
+
+plt
+
+block_section(prop_section(page_size = page_size(orient = 'landscape')))
+```
+
+### Section and Outcome
+
+```{r outcomes_sections_and_outcomes, echo = FALSE}
+df_data <- df_outcomes %>% 
+  filter(as.Date(month) < month_end & 
+           as.Date(month) >= quarter_start & as.Date(month) < quarter_end) %>%
+  group_by(section, outcome) %>%
+  summarise(volume = n(), .groups = 'keep') %>%
+  ungroup()
+
+df_data <- fnGlenday(df_data, var.x = 'outcome', var.y = 'volume')
+
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    section = 'Section',
+    outcome = 'Outcome',
+    volume = 'Volume',
+    pct = '% of Outcomes',
+    cumpct = 'Cumulative % of Outcomes',
+    glenday = 'Glenday Sieve') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  mk_par(j = 'pct', value = as_paragraph(as_chunk(pct, formatter = fmt_pct))) %>%
+  mk_par(j = 'cumpct', value = as_paragraph(as_chunk(cumpct, formatter = fmt_pct))) %>%
+  bg(j = 'glenday', bg = palGlenday) %>%
+  color(j = 'glenday', color = function(x){ifelse(x=='Yellow', 'black', 'white')}) %>%
+  align(j = 'glenday', align = 'center') %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  bold(bold = TRUE, part = "header")
+tbl
+```
+
