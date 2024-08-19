@@ -3,7 +3,7 @@ title: "Flow Reporting"
 author: "Nicola Topham"
 output: officedown::rdocx_document
 params:
-  current_month: 2024-06-01
+  current_month: 2024-05-01
 ---
 
 ```{r setup, include=FALSE}
@@ -156,14 +156,16 @@ for(s in tracker_sheets){
                        col_type = 'text') %>%
     rename_with(.fn = ~tracker_col_names) %>%
     dplyr::filter(!is.na(name)) %>%
-    mutate(support_start = as.Date(support_start, format = '%d/%m/%Y'),
-           support_end = as.Date(support_end, format = '%d/%m/%Y'))
+    mutate(support_start = as.Date(as.integer(support_start), origin = '1899-12-30'),
+           support_end = as.Date(as.integer(support_end), origin = '1899-12-30'))
+    # mutate(support_start = as.Date(support_start, format = '%d/%m%/Y'),
+    #       support_end = as.Date(support_end, format = '%d/%m%/Y'))
   df_caseload_tracker <- df_caseload_tracker %>% bind_rows(df_tmp)
 }
 
 # Simplify the data frame
 df_caseload_tracker <- df_caseload_tracker %>% 
-  select(gender, age, postcode, 
+  select(nhs_number, gender, age, postcode, 
          status, closure_reason, support_start, support_end, 
          ed_3m, em_3m, amb_3m,
          ed_12m, em_12m, amb_12m,
@@ -177,7 +179,11 @@ df_caseload_tracker <- df_caseload_tracker %>%
          personal_growth_entry, personal_growth_exit,
          community_entry, community_exit,
          abuse_neglect_entry, abuse_neglect_exit,
-         child_support_entry, child_support_exit)
+         child_support_entry, child_support_exit) %>%
+  mutate(nhs_number = as.integer(nhs_number),
+         support_start = as.Date(support_start), support_end = as.Date(support_end), 
+         ed_3m = as.integer(ed_3m), em_3m = as.integer(em_3m), amb_3m = as.integer(amb_3m),
+         wemwbs_entry = as.integer(wemwbs_entry), wemwbs_exit = as.integer(wemwbs_exit))
 
 ed_col_names <- unlist(unname(ini_file_settings$ed_activity)[grepl('^col_name_', names(ini_file_settings$ed_activity))])
 
@@ -186,9 +192,9 @@ df_ed_activity <- read_excel(path = ini_file_settings$ed_activity$path,
                              sheet = ini_file_settings$ed_activity$sheet) %>%
   rename_with(.fn = ~ed_col_names) %>%
   select(patient_id, nhs_number, hospital_number,
-         ed_curr_12m, em_curr_12m, amb_curr_12m)
+         ed_curr_3m, em_curr_3m, amb_curr_3m)
 
-dir.create('./output')
+dir.create('./output', showWarnings = FALSE, recursive = TRUE)
 save(file = './output/reporting_workbooks_data.RObj', list = c('df_data_points', 'df_support_and_referrals', 'df_outputs', 'df_outcomes', 'df_caseload_tracker', 'df_ed_activity'))
 ```
 
@@ -198,44 +204,164 @@ save(file = './output/reporting_workbooks_data.RObj', list = c('df_data_points',
 # and have a closure reason of NA, Closed successfully or disengaged
 valid_closure_reasons <- c('Closed successfully', 'Disengaged')
 
-df_caseload_tracker %>% 
+# ───────────────────── #
+# New clients supported #
+# ───────────────────── #
+df_data <- df_caseload_tracker %>% 
   filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
-           as.Date(support_start) < month_end & 
-           as.Date(support_start) >= as.Date(quarter_list[1]) &  
-           as.Date(support_start) < as.Date(quarter_list[2])) %>%
-  summarise(Q1 = n()) %>%
-  ungroup() %>%
-  bind_cols(
-    df_caseload_tracker %>% 
-      filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
-               as.Date(support_start) < month_end & 
-               as.Date(support_start) >= as.Date(quarter_list[2]) &  
-               as.Date(support_start) < as.Date(quarter_list[3])) %>%
-      summarise(Q2 = n()) %>%
-      ungroup()
-  ) %>%
-  bind_cols(
-    df_caseload_tracker %>% 
-      filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
-               as.Date(support_start) < month_end & 
-               as.Date(support_start) >= as.Date(quarter_list[3]) &  
-               as.Date(support_start) < as.Date(quarter_list[4])) %>%
-      summarise(Q3 = n()) %>%
-      ungroup()
-  ) %>%
-  bind_cols(
-    df_caseload_tracker %>% 
-      filter((is.na(closure_reason) | closure_reason %in% valid_closure_reasons) &
-               as.Date(support_start) < month_end & 
-               as.Date(support_start) >= as.Date(quarter_list[4]) &  
-               as.Date(support_start) < as.Date(quarter_list[5])) %>%
-      summarise(Q4 = n()) %>%
-      ungroup()
-  )
-  
-  
+           support_start < month_end) %>%
+  summarise(M = sum(if_else(support_start >= month_start & support_start < month_end, 1, 0)),
+            Q1 = sum(if_else(support_start >= as.Date(quarter_list[1]) & 
+                               support_start < as.Date(quarter_list[2]), 1, 0)),
+            Q2 = sum(if_else(support_start >= as.Date(quarter_list[2]) & 
+                               support_start < as.Date(quarter_list[3]), 1, 0)),
+            Q3 = sum(if_else(support_start >= as.Date(quarter_list[3]) & 
+                               support_start < as.Date(quarter_list[4]), 1, 0)),
+            Q4 = sum(if_else(support_start >= as.Date(quarter_list[4]) & 
+                               support_start < as.Date(quarter_list[5]), 1, 0))) %>%
+  mutate(YTD = Q1 + Q2 + Q3 + Q4) %>%
+  mutate(KPI = 'New clients supported', .before = 1) %>% bind_rows(
+# ────────────────── #
+# Reduced loneliness #
+# ────────────────── #
+df_outcomes %>% 
+  filter(section == 'Relationships / Family and Friends' & outcome == 'Reduced feelings of loneliness' & as.Date(month) < month_end) %>%
+  summarise(M = sum(if_else(as.Date(month) >= month_start &  as.Date(month) < month_end, 1, 0)),
+            Q1 = sum(if_else(as.Date(month) >= as.Date(quarter_list[1]) & 
+                               as.Date(month) < as.Date(quarter_list[2]), 1, 0)),
+            Q2 = sum(if_else(as.Date(month) >= as.Date(quarter_list[2]) & 
+                               as.Date(month) < as.Date(quarter_list[3]), 1, 0)),
+            Q3 = sum(if_else(as.Date(month) >= as.Date(quarter_list[3]) & 
+                               as.Date(month) < as.Date(quarter_list[4]), 1, 0)),
+            Q4 = sum(if_else(as.Date(month) >= as.Date(quarter_list[4]) & 
+                               as.Date(month) < as.Date(quarter_list[5]), 1, 0))) %>%
+  mutate(YTD = Q1 + Q2 + Q3 + Q4) %>%
+  mutate(KPI = 'Number of reduced loneliness outcomes', .before = 1)
+) %>% bind_rows(
 
+# ────────────────────────── #
+# WEMWBS - Closed cases only #
+# ────────────────────────── #
+df_caseload_tracker %>% 
+  filter(closure_reason %in% valid_closure_reasons) %>% 
+  select(support_end, wemwbs_entry, wemwbs_exit) %>%
+  mutate(wemwbs_change = if_else(!is.na(wemwbs_entry) & !is.na(wemwbs_exit), wemwbs_exit - wemwbs_entry, NA)) %>%
+  summarise(M = mean(if_else(support_end >= month_start &  support_end < month_end, 
+                             wemwbs_change, NA), na.rm = TRUE),
+            Q1 = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[2]), 
+                              wemwbs_change, NA), na.rm = TRUE),
+            Q2 = mean(if_else(support_end >= as.Date(quarter_list[2]) & 
+                               support_end < as.Date(quarter_list[3]), 
+                              wemwbs_change, NA), na.rm = TRUE),
+            Q3 = mean(if_else(support_end >= as.Date(quarter_list[3]) & 
+                               support_end < as.Date(quarter_list[4]), 
+                              wemwbs_change, NA), na.rm = TRUE),
+            Q4 = mean(if_else(support_end >= as.Date(quarter_list[4]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                              wemwbs_change, NA), na.rm = TRUE),
+            YTD = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                               wemwbs_change, NA), na.rm = TRUE)) %>%
+  mutate(KPI = 'Reduction in WEMWBS Score', .before = 1)) %>% bind_rows(
+# ───────────────────────────────────────── #
+# Reduction in ED attendance - Closed Cases #
+# ───────────────────────────────────────── #
+df_caseload_tracker %>% 
+  filter(closure_reason %in% valid_closure_reasons) %>% 
+  select(support_end, nhs_number, ed_3m) %>%
+  left_join(df_ed_activity %>% select(nhs_number, ed_curr_3m), by = 'nhs_number') %>%
+  mutate(ed_change = if_else(!is.na(ed_3m) & !is.na(ed_curr_3m), 
+                             ed_curr_3m - ed_3m, NA)) %>%
+  summarise(M = mean(if_else(support_end >= month_start &  support_end < month_end, 
+                             ed_change, NA), na.rm = TRUE),
+            Q1 = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[2]), 
+                              ed_change, NA), na.rm = TRUE),
+            Q2 = mean(if_else(support_end >= as.Date(quarter_list[2]) & 
+                               support_end < as.Date(quarter_list[3]), 
+                              ed_change, NA), na.rm = TRUE),
+            Q3 = mean(if_else(support_end >= as.Date(quarter_list[3]) & 
+                               support_end < as.Date(quarter_list[4]), 
+                              ed_change, NA), na.rm = TRUE),
+            Q4 = mean(if_else(support_end >= as.Date(quarter_list[4]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                              ed_change, NA), na.rm = TRUE),
+            YTD = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                               ed_change, NA), na.rm = TRUE)) %>%
+  mutate(KPI = 'Reduction in ED Attendances', .before = 1)) %>% bind_rows(
+# ───────────────────────────────────────── #
+# Reduction in EM Admissions - Closed Cases #
+# ───────────────────────────────────────── #
+df_caseload_tracker %>% 
+  filter(closure_reason %in% valid_closure_reasons) %>% 
+  select(support_end, nhs_number, em_3m) %>%
+  left_join(df_ed_activity %>% select(nhs_number, em_curr_3m), by = 'nhs_number') %>%
+  mutate(em_change = if_else(!is.na(em_3m) & !is.na(em_curr_3m), 
+                             em_curr_3m - em_3m, NA)) %>%
+  summarise(M = mean(if_else(support_end >= month_start &  support_end < month_end, 
+                             em_change, NA), na.rm = TRUE),
+            Q1 = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[2]), 
+                              em_change, NA), na.rm = TRUE),
+            Q2 = mean(if_else(support_end >= as.Date(quarter_list[2]) & 
+                               support_end < as.Date(quarter_list[3]), 
+                              em_change, NA), na.rm = TRUE),
+            Q3 = mean(if_else(support_end >= as.Date(quarter_list[3]) & 
+                               support_end < as.Date(quarter_list[4]), 
+                              em_change, NA), na.rm = TRUE),
+            Q4 = mean(if_else(support_end >= as.Date(quarter_list[4]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                              em_change, NA), na.rm = TRUE),
+            YTD = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                               em_change, NA), na.rm = TRUE)) %>%
+  mutate(KPI = 'Reduction in EM Admissions', .before = 1)) %>% bind_rows(
+# ─────────────────────────────────────── #
+# Reduction in AMB Conveys - Closed Cases #
+# ─────────────────────────────────────── #
+df_caseload_tracker %>% 
+  filter(closure_reason %in% valid_closure_reasons) %>% 
+  select(support_end, nhs_number, amb_3m) %>%
+  left_join(df_ed_activity %>% select(nhs_number, amb_curr_3m), by = 'nhs_number') %>%
+  mutate(amb_change = if_else(!is.na(amb_3m) & !is.na(amb_curr_3m), 
+                             amb_curr_3m - amb_3m, NA)) %>%
+  summarise(M = mean(if_else(support_end >= month_start &  support_end < month_end, 
+                             amb_change, NA), na.rm = TRUE),
+            Q1 = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[2]), 
+                              amb_change, NA), na.rm = TRUE),
+            Q2 = mean(if_else(support_end >= as.Date(quarter_list[2]) & 
+                               support_end < as.Date(quarter_list[3]), 
+                              amb_change, NA), na.rm = TRUE),
+            Q3 = mean(if_else(support_end >= as.Date(quarter_list[3]) & 
+                               support_end < as.Date(quarter_list[4]), 
+                              amb_change, NA), na.rm = TRUE),
+            Q4 = mean(if_else(support_end >= as.Date(quarter_list[4]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                              amb_change, NA), na.rm = TRUE),
+            YTD = mean(if_else(support_end >= as.Date(quarter_list[1]) & 
+                               support_end < as.Date(quarter_list[5]), 
+                               amb_change, NA), na.rm = TRUE)) %>%
+  mutate(KPI = 'Reduction in AMB Conveys', .before = 1)
+)
 
+tbl <- flextable(df_data) %>%
+  set_header_labels(
+    category = 'NHS England KPI',
+    Month = 'Month',
+    Q1 = 'Q1',
+    Q2 = 'Q2',
+    Q3 = 'Q3',
+    Q4 = 'Q4',
+    YTD = 'YTD') %>%
+  set_table_properties(layout = "autofit", width = .9) %>%
+  hline(part = "body", border = std_border) %>%
+  vline(part = "all", border = std_border) %>%
+  vline(j = c(1:2, 6:7), part = "all", border = fp_border()) %>%
+  bold(bold = TRUE, part = "header")
+tbl
 
 ```
 
